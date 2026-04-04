@@ -435,3 +435,59 @@ func assertNotContains(t *testing.T, value string, substring string) {
 		t.Fatalf("expected %q not to contain %q", value, substring)
 	}
 }
+
+func TestRotateCodex(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	sourcePath := filepath.Join(tempDir, "auth.json.bak")
+	targetPath := filepath.Join(tempDir, "auth.json")
+
+	writeFile(t, sourcePath, `[
+	  {
+	    "email": "first@example.com",
+	    "tokens": {
+	      "id_token": "id-1",
+	      "access_token": "access-1",
+	      "refresh_token": "refresh-1"
+	    }
+	  },
+	  {
+	    "email": "second@example.com",
+	    "tokens": {
+	      "id_token": "id-2",
+	      "access_token": "access-2",
+	      "refresh_token": "refresh-2",
+	      "account_id": "acc-2"
+	    }
+	  }
+	]`)
+
+	writeFile(t, targetPath, `{
+	  "auth_mode": "oauth",
+	  "tokens": {
+	    "id_token": "id-1",
+	    "access_token": "access-1",
+	    "refresh_token": "refresh-1"
+	  }
+	}`)
+
+	var logBuffer bytes.Buffer
+	svc := NewService(log.New(&logBuffer, "", 0))
+
+	err := svc.RotateCodex(sourcePath, targetPath, "second@example.com")
+	if err != nil {
+		t.Fatalf("RotateCodex() error = %v", err)
+	}
+
+	updated := readFile(t, targetPath)
+	assertContains(t, updated, `"auth_mode": "oauth"`)
+	assertContains(t, updated, `"id_token": "id-2"`)
+	assertContains(t, updated, `"access_token": "access-2"`)
+	assertContains(t, updated, `"refresh_token": "refresh-2"`)
+	assertContains(t, updated, `"account_id": "acc-2"`)
+
+	logs := logBuffer.String()
+	assertContains(t, logs, "DEBUG rotate codex start")
+	assertContains(t, logs, "s***d@example.com")
+}

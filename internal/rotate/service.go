@@ -35,6 +35,18 @@ type Result struct {
 	AccountCount      int
 }
 
+type CodexTokens struct {
+	IDToken      string `json:"id_token,omitempty"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	AccountID    string `json:"account_id,omitempty"`
+}
+
+type CodexAccount struct {
+	Email  string      `json:"email"`
+	Tokens CodexTokens `json:"tokens"`
+}
+
 type Service struct {
 	logger          *log.Logger
 	writeFileAtomic func(string, []byte, os.FileMode) error
@@ -297,4 +309,65 @@ func (s *Service) debug(format string, args ...any) {
 	}
 
 	s.logger.Printf("DEBUG "+format, args...)
+}
+
+func (s *Service) RotateCodex(sourcePath, targetPath, selectedEmail string) error {
+	s.debug("rotate codex start source=%s target=%s email=%s", sourcePath, targetPath, maskEmail(selectedEmail))
+
+	unlock, err := lockFile(targetPath + ".lock")
+	if err != nil {
+		return fmt.Errorf("lock codex target: %w", err)
+	}
+	defer unlock()
+
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return fmt.Errorf("read codex source: %w", err)
+	}
+
+	var accounts []CodexAccount
+	if err := json.Unmarshal(data, &accounts); err != nil {
+		return fmt.Errorf("decode codex source: %w", err)
+	}
+
+	var matchedAccount *CodexAccount
+	for _, acc := range accounts {
+		if acc.Email == selectedEmail {
+			matchedAccount = &acc
+			break
+		}
+	}
+
+	if matchedAccount == nil {
+		return fmt.Errorf("codex account for email %q not found in source", selectedEmail)
+	}
+
+	var targetConfig map[string]any
+	targetMode := os.FileMode(0o600)
+
+	if info, err := os.Stat(targetPath); err == nil {
+		targetMode = info.Mode().Perm()
+		if targetData, err := os.ReadFile(targetPath); err == nil {
+			_ = json.Unmarshal(targetData, &targetConfig)
+		}
+	}
+
+	if targetConfig == nil {
+		targetConfig = make(map[string]any)
+	}
+
+	targetConfig["tokens"] = matchedAccount.Tokens
+
+	updatedJSON, err := json.MarshalIndent(targetConfig, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode codex target: %w", err)
+	}
+	updatedJSON = append(updatedJSON, '\n')
+
+	if err := s.writeFileAtomic(targetPath, updatedJSON, targetMode); err != nil {
+		return fmt.Errorf("write codex target: %w", err)
+	}
+
+	s.debug("rotate codex complete target=%s", targetPath)
+	return nil
 }

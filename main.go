@@ -22,11 +22,15 @@ func main() {
 	defaultSourcePath := filepath.Join(homeDir, ".local", "share", "opencode", "auth_open_ai.json")
 	defaultTargetPath := filepath.Join(homeDir, ".local", "share", "opencode", "auth.json")
 	defaultGeminiPath := filepath.Join(homeDir, ".gemini", "google_accounts.json")
+	defaultCodexSourcePath := filepath.Join(homeDir, ".codex", "auth.json.bak")
+	defaultCodexTargetPath := filepath.Join(homeDir, ".codex", "auth.json")
 
 	provider := flag.String("provider", "openai", "provider to rotate: openai or gemini")
 	sourcePath := flag.String("source", defaultSourcePath, "path to auth_open_ai.json (openai only)")
 	targetPath := flag.String("target", defaultTargetPath, "path to auth.json (openai only)")
 	geminiPath := flag.String("gemini-path", defaultGeminiPath, "path to google_accounts.json (gemini only)")
+	codexSourcePath := flag.String("codex-source", defaultCodexSourcePath, "path to codex auth.json.bak")
+	codexTargetPath := flag.String("codex-target", defaultCodexTargetPath, "path to codex auth.json")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: auth-rotate [options]\n\n")
@@ -64,6 +68,14 @@ func main() {
 		)
 
 		fmt.Printf("rotated openai account: %s -> %s\n", result.PreviousAccountID, result.SelectedAccountID)
+
+		if err := service.RotateCodex(*codexSourcePath, *codexTargetPath, result.SelectedEmail); err != nil {
+			logger.Printf("DEBUG cli codex error source=%s target=%s err=%v", *codexSourcePath, *codexTargetPath, err)
+			fmt.Fprintf(os.Stderr, "warning: rotate codex failed: %v\n", err)
+		} else {
+			logger.Printf("DEBUG cli codex complete target=%s", *codexTargetPath)
+			fmt.Printf("rotated codex account to match email: %s\n", result.SelectedEmail)
+		}
 
 	case "gemini":
 		geminiDir := filepath.Dir(*geminiPath)
