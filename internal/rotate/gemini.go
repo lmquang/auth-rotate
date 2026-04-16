@@ -5,161 +5,91 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 )
 
-type GeminiAccounts struct {
-	Active string   `json:"active"`
-	Old    []string `json:"old"`
-}
+func (s *Service) RotateGemini(configPath, activeCredsPath string) (GeminiResult, error) {
+	s.debug("rotate_gemini start config=%s target_active=%s", configPath, activeCredsPath)
 
-type GeminiCredEntry struct {
-	Email string          `json:"email"`
-	Data  json.RawMessage `json:"data"`
-}
-
-type GeminiResult struct {
-	PreviousEmail string
-	SelectedEmail string
-	AccountCount  int
-}
-
-func (s *Service) RotateGemini(googleAccountsPath, masterCredsPath, activeCredsPath string) (GeminiResult, error) {
-	s.debug("rotate_gemini start google_accounts_path=%s master_creds_path=%s active_creds_path=%s",
-		googleAccountsPath, masterCredsPath, activeCredsPath)
-
-	unlock, err := lockFile(googleAccountsPath + ".lock")
+	unlock, err := lockFile(configPath + ".lock")
 	if err != nil {
-		return GeminiResult{}, fmt.Errorf("lock gemini target: %w", err)
+		return GeminiResult{}, fmt.Errorf("lock config: %w", err)
 	}
 	defer unlock()
 
-	s.debug("rotate_gemini lock acquired path=%s", googleAccountsPath)
-
-	info, err := os.Stat(googleAccountsPath)
+	configData, err := os.ReadFile(configPath)
 	if err != nil {
-		return GeminiResult{}, fmt.Errorf("stat gemini target: %w", err)
+		return GeminiResult{}, fmt.Errorf("read config: %w", err)
 	}
 
-	data, err := os.ReadFile(googleAccountsPath)
-	if err != nil {
-		return GeminiResult{}, fmt.Errorf("read gemini target: %w", err)
+	var creds Credentials
+	if err := json.Unmarshal(configData, &creds); err != nil {
+		return GeminiResult{}, fmt.Errorf("decode config: %w", err)
 	}
 
-	var accounts GeminiAccounts
-	if err := json.Unmarshal(data, &accounts); err != nil {
-		return GeminiResult{}, fmt.Errorf("decode gemini target: %w", err)
+	if len(creds.Gemini.Accounts) == 0 {
+		return GeminiResult{}, errors.New("no accounts in gemini config")
 	}
 
-	if strings.TrimSpace(accounts.Active) == "" {
-		return GeminiResult{}, errors.New("missing active email in gemini accounts")
-	}
+	previousEmail := creds.Gemini.ActiveEmail
+	var selectedAccount *GeminiCredEntry
 
-	previousEmail := accounts.Active
-
-	if len(accounts.Old) == 0 {
-		s.debug("rotate_gemini single account stable email=%s", maskEmail(previousEmail))
-
-		if err := s.updateCredsFile(masterCredsPath, activeCredsPath, previousEmail); err != nil {
-			return GeminiResult{}, err
-		}
-
-		return GeminiResult{
-			PreviousEmail: previousEmail,
-			SelectedEmail: previousEmail,
-			AccountCount:  1,
-		}, nil
-	}
-
-	nextEmail := accounts.Old[0]
-
-	newOld := make([]string, 0, len(accounts.Old))
-	for _, email := range accounts.Old[1:] {
-		if email != previousEmail {
-			newOld = append(newOld, email)
+	currentIndex := 0
+	if previousEmail != "" {
+		for i, acc := range creds.Gemini.Accounts {
+			if acc.Email == previousEmail {
+				currentIndex = i
+				break
+			}
 		}
 	}
-	if previousEmail != nextEmail {
-		newOld = append(newOld, previousEmail)
-	}
 
-	updated := GeminiAccounts{
-		Active: nextEmail,
-		Old:    newOld,
-	}
-
-	updatedJSON, err := json.MarshalIndent(updated, "", "  ")
-	if err != nil {
-		return GeminiResult{}, fmt.Errorf("encode gemini target: %w", err)
-	}
-	updatedJSON = append(updatedJSON, '\n')
-
-	accountCount := len(accounts.Old) + 1
-
-	s.debug(
-		"rotate_gemini selected previous_email=%s selected_email=%s account_count=%d",
-		maskEmail(previousEmail),
-		maskEmail(nextEmail),
-		accountCount,
-	)
-
-	if err := s.writeFileAtomic(googleAccountsPath, updatedJSON, info.Mode().Perm()); err != nil {
-		return GeminiResult{}, fmt.Errorf("write gemini target: %w", err)
-	}
-
-	if err := s.updateCredsFile(masterCredsPath, activeCredsPath, nextEmail); err != nil {
-		return GeminiResult{}, err
-	}
-
-	s.debug("rotate_gemini complete path=%s selected_email=%s", googleAccountsPath, maskEmail(nextEmail))
-
-	return GeminiResult{
-		PreviousEmail: previousEmail,
-		SelectedEmail: nextEmail,
-		AccountCount:  accountCount,
-	}, nil
-}
-
-func (s *Service) updateCredsFile(masterCredsPath, activeCredsPath, email string) error {
-	s.debug("update_creds start master_path=%s active_path=%s email=%s", masterCredsPath, activeCredsPath, maskEmail(email))
-
-	masterData, err := os.ReadFile(masterCredsPath)
-	if err != nil {
-		return fmt.Errorf("read master creds: %w", err)
-	}
-
-	var entries []GeminiCredEntry
-	if err := json.Unmarshal(masterData, &entries); err != nil {
-		return fmt.Errorf("decode master creds: %w", err)
-	}
-
-	var credData json.RawMessage
-	for _, entry := range entries {
-		if entry.Email == email {
-			credData = entry.Data
+	accountCount := len(creds.Gemini.Accounts)
+	for i := 1; i <= accountCount; i++ {
+		nextIndex := (currentIndex + i) % accountCount
+		acc := creds.Gemini.Accounts[nextIndex]
+		if acc.IsActive {
+			selectedAccount = &acc
 			break
 		}
 	}
 
-	if credData == nil {
-		return fmt.Errorf("email %s not found in master creds", maskEmail(email))
+	if selectedAccount == nil {
+		return GeminiResult{}, errors.New("no active accounts found in gemini config")
 	}
 
-	activeJSON, err := json.MarshalIndent(credData, "", "  ")
+	creds.Gemini.ActiveEmail = selectedAccount.Email
+
+	updatedConfigJSON, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode active creds: %w", err)
+		return GeminiResult{}, fmt.Errorf("encode updated config: %w", err)
+	}
+	updatedConfigJSON = append(updatedConfigJSON, '\n')
+
+	if err := s.writeFileAtomic(configPath, updatedConfigJSON, 0o600); err != nil {
+		return GeminiResult{}, fmt.Errorf("write config target: %w", err)
+	}
+
+	info, err := os.Stat(activeCredsPath)
+	targetMode := os.FileMode(0o600)
+	if err == nil {
+		targetMode = info.Mode().Perm()
+	}
+
+	activeJSON, err := json.MarshalIndent(selectedAccount.Data, "", "  ")
+	if err != nil {
+		return GeminiResult{}, fmt.Errorf("encode active creds: %w", err)
 	}
 	activeJSON = append(activeJSON, '\n')
 
-	info, err := os.Stat(activeCredsPath)
-	if err != nil {
-		return fmt.Errorf("stat active creds: %w", err)
+	if err := s.writeFileAtomic(activeCredsPath, activeJSON, targetMode); err != nil {
+		return GeminiResult{}, fmt.Errorf("write active creds target: %w", err)
 	}
 
-	if err := s.writeFileAtomic(activeCredsPath, activeJSON, info.Mode().Perm()); err != nil {
-		return fmt.Errorf("write active creds: %w", err)
-	}
+	s.debug("rotate_gemini complete selected_email=%s", maskEmail(selectedAccount.Email))
 
-	s.debug("update_creds complete active_path=%s email=%s", activeCredsPath, maskEmail(email))
-	return nil
+	return GeminiResult{
+		PreviousEmail: previousEmail,
+		SelectedEmail: selectedAccount.Email,
+		AccountCount:  accountCount,
+	}, nil
 }

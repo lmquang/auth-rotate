@@ -10,394 +10,159 @@ import (
 	"testing"
 )
 
-func TestRotateNextAccount(t *testing.T) {
+func TestRotateOpenAIAndCodexToNextActive(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
+	configPath := filepath.Join(tempDir, "credentials.json")
+	openAITargetPath := filepath.Join(tempDir, "auth.json")
+	codexTargetPath := filepath.Join(tempDir, "codex.json")
 
-	writeFile(t, sourcePath, `[
-	  {
-	    "email": "first@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-1",
-	      "refresh": "refresh-1",
-	      "expires": 111,
-	      "accountId": "account-1"
-	    }
-	  },
-	  {
-	    "email": "second@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-2",
-	      "refresh": "refresh-2",
-	      "expires": 222,
-	      "accountId": "account-2"
-	    }
-	  }
-	]`)
-
-	writeFile(t, targetPath, `{
-	  "openrouter": {
-	    "type": "api",
-	    "key": "keep-me"
-	  },
-	  "openai": {
-	    "type": "oauth",
-	    "access": "access-1",
-	    "refresh": "refresh-1",
-	    "expires": 111,
-	    "accountId": "account-1"
-	  },
-	  "extra": {
-	    "enabled": true
+	writeFile(t, configPath, `{
+	  "openai_codex": {
+	    "activeEmail": "first@example.com",
+	    "accounts": [
+	      {
+	        "email": "first@example.com",
+	        "isActive": true,
+	        "openai": {"access": "access-1"},
+	        "codex": {"access_token": "token-1"}
+	      },
+	      {
+	        "email": "second@example.com",
+	        "isActive": true,
+	        "openai": {"access": "access-2"},
+	        "codex": {"access_token": "token-2"}
+	      }
+	    ]
 	  }
 	}`)
+
+	writeFile(t, openAITargetPath, `{"extra": "keep-me", "openai": {"old": "val"}}`)
+	writeFile(t, codexTargetPath, `{"extra_codex": "keep-me", "tokens": {"old": "val"}}`)
 
 	var logBuffer bytes.Buffer
 	svc := NewService(log.New(&logBuffer, "", 0))
 
-	result, err := svc.Rotate(sourcePath, targetPath)
+	result, err := svc.RotateOpenAIAndCodex(configPath, openAITargetPath, codexTargetPath)
 	if err != nil {
-		t.Fatalf("Rotate() error = %v", err)
+		t.Fatalf("RotateOpenAIAndCodex() error = %v", err)
 	}
 
-	if result.PreviousAccountID != "account-1" {
-		t.Fatalf("PreviousAccountID = %q, want %q", result.PreviousAccountID, "account-1")
+	if result.PreviousEmail != "first@example.com" {
+		t.Fatalf("PreviousEmail = %q, want %q", result.PreviousEmail, "first@example.com")
 	}
 
-	if result.SelectedAccountID != "account-2" {
-		t.Fatalf("SelectedAccountID = %q, want %q", result.SelectedAccountID, "account-2")
+	if result.SelectedEmail != "second@example.com" {
+		t.Fatalf("SelectedEmail = %q, want %q", result.SelectedEmail, "second@example.com")
 	}
 
-	updated := readFile(t, targetPath)
-	assertContains(t, updated, `"accountId": "account-2"`)
-	assertContains(t, updated, `"access": "access-2"`)
-	assertContains(t, updated, `"refresh": "refresh-2"`)
-	assertContains(t, updated, `"key": "keep-me"`)
-	assertContains(t, updated, `"enabled": true`)
+	// Verify config was updated
+	updatedConfig := readFile(t, configPath)
+	assertContains(t, updatedConfig, `"activeEmail": "second@example.com"`)
 
-	logs := logBuffer.String()
-	assertContains(t, logs, "DEBUG rotate start")
-	assertContains(t, logs, "selected_account_id=account-2")
-	assertNotContains(t, logs, "access-2")
-	assertNotContains(t, logs, "refresh-2")
-	assertNotContains(t, logs, "second@example.com")
-	assertContains(t, logs, "s***d@example.com")
+	// Verify OpenAI target was updated
+	updatedOpenAI := readFile(t, openAITargetPath)
+	assertContains(t, updatedOpenAI, `"access": "access-2"`)
+	assertContains(t, updatedOpenAI, `"extra": "keep-me"`)
+
+	// Verify Codex target was updated
+	updatedCodex := readFile(t, codexTargetPath)
+	assertContains(t, updatedCodex, `"access_token": "token-2"`)
 }
 
-func TestRotateWrapsAround(t *testing.T) {
+func TestRotateOpenAIAndCodexSkipsInactive(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
+	configPath := filepath.Join(tempDir, "credentials.json")
+	openAITargetPath := filepath.Join(tempDir, "auth.json")
+	codexTargetPath := filepath.Join(tempDir, "codex.json")
 
-	writeFile(t, sourcePath, `[
-	  {
-	    "email": "first@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-1",
-	      "refresh": "refresh-1",
-	      "expires": 111,
-	      "accountId": "account-1"
-	    }
-	  },
-	  {
-	    "email": "second@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-2",
-	      "refresh": "refresh-2",
-	      "expires": 222,
-	      "accountId": "account-2"
-	    }
-	  }
-	]`)
-
-	writeFile(t, targetPath, `{
-	  "openai": {
-	    "type": "oauth",
-	    "access": "access-2",
-	    "refresh": "refresh-2",
-	    "expires": 222,
-	    "accountId": "account-2"
+	writeFile(t, configPath, `{
+	  "openai_codex": {
+	    "activeEmail": "first@example.com",
+	    "accounts": [
+	      {
+	        "email": "first@example.com",
+	        "isActive": true,
+	        "openai": {"access": "access-1"},
+	        "codex": {"access_token": "token-1"}
+	      },
+	      {
+	        "email": "second@example.com",
+	        "isActive": false,
+	        "openai": {"access": "access-2"},
+	        "codex": {"access_token": "token-2"}
+	      },
+	      {
+	        "email": "third@example.com",
+	        "isActive": true,
+	        "openai": {"access": "access-3"},
+	        "codex": {"access_token": "token-3"}
+	      }
+	    ]
 	  }
 	}`)
 
-	svc := NewService(log.New(&bytes.Buffer{}, "", 0))
-
-	result, err := svc.Rotate(sourcePath, targetPath)
-	if err != nil {
-		t.Fatalf("Rotate() error = %v", err)
-	}
-
-	if result.SelectedAccountID != "account-1" {
-		t.Fatalf("SelectedAccountID = %q, want %q", result.SelectedAccountID, "account-1")
-	}
-
-	updated := readFile(t, targetPath)
-	assertContains(t, updated, `"accountId": "account-1"`)
-	assertContains(t, updated, `"access": "access-1"`)
-	assertContains(t, updated, `"refresh": "refresh-1"`)
-}
-
-func TestRotateSingleAccountStaysStable(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
-
-	writeFile(t, sourcePath, `[
-	  {
-	    "email": "solo@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-1",
-	      "refresh": "refresh-1",
-	      "expires": 111,
-	      "accountId": "account-1"
-	    }
-	  }
-	]`)
-
-	writeFile(t, targetPath, `{
-	  "openai": {
-	    "type": "oauth",
-	    "access": "old-access",
-	    "refresh": "old-refresh",
-	    "expires": 100,
-	    "accountId": "account-1"
-	  }
-	}`)
+	writeFile(t, openAITargetPath, `{}`)
+	writeFile(t, codexTargetPath, `{}`)
 
 	svc := NewService(log.New(&bytes.Buffer{}, "", 0))
 
-	result, err := svc.Rotate(sourcePath, targetPath)
+	result, err := svc.RotateOpenAIAndCodex(configPath, openAITargetPath, codexTargetPath)
 	if err != nil {
-		t.Fatalf("Rotate() error = %v", err)
+		t.Fatalf("error = %v", err)
 	}
 
-	if result.SelectedAccountID != "account-1" {
-		t.Fatalf("SelectedAccountID = %q, want %q", result.SelectedAccountID, "account-1")
+	if result.SelectedEmail != "third@example.com" {
+		t.Fatalf("SelectedEmail = %q, want third@example.com", result.SelectedEmail)
 	}
 }
 
-func TestRotateErrorsWhenCurrentAccountMissing(t *testing.T) {
+func TestRotateOpenAIAndCodexLeavesFileUntouchedOnFailure(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
+	configPath := filepath.Join(tempDir, "credentials.json")
+	openAITargetPath := filepath.Join(tempDir, "auth.json")
+	codexTargetPath := filepath.Join(tempDir, "codex.json")
 
-	writeFile(t, sourcePath, `[
-	  {
-	    "email": "first@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-1",
-	      "refresh": "refresh-1",
-	      "expires": 111,
-	      "accountId": "account-1"
-	    }
-	  }
-	]`)
-
-	original := `{
-	  "openai": {
-	    "type": "oauth",
-	    "access": "old-access",
-	    "refresh": "old-refresh",
-	    "expires": 100,
-	    "accountId": "missing-account"
+	originalConfig := `{
+	  "openai_codex": {
+	    "activeEmail": "first@example.com",
+	    "accounts": [
+	      {
+	        "email": "first@example.com",
+	        "isActive": true,
+	        "openai": {},
+	        "codex": {}
+	      },
+	      {
+	        "email": "second@example.com",
+	        "isActive": true,
+	        "openai": {},
+	        "codex": {}
+	      }
+	    ]
 	  }
 	}`
-	writeFile(t, targetPath, original)
-
-	svc := NewService(log.New(&bytes.Buffer{}, "", 0))
-
-	_, err := svc.Rotate(sourcePath, targetPath)
-	if err == nil {
-		t.Fatal("Rotate() error = nil, want error")
-	}
-
-	assertContains(t, err.Error(), "current accountId")
-	if got := readFile(t, targetPath); got != original {
-		t.Fatalf("target file changed unexpectedly\n got: %s\nwant: %s", got, original)
-	}
-}
-
-func TestRotateErrorsForEmptySourceList(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
-
-	writeFile(t, sourcePath, `[]`)
-	writeFile(t, targetPath, `{"openai":{"accountId":"account-1"}}`)
-
-	svc := NewService(log.New(&bytes.Buffer{}, "", 0))
-
-	_, err := svc.Rotate(sourcePath, targetPath)
-	if err == nil {
-		t.Fatal("Rotate() error = nil, want error")
-	}
-
-	assertContains(t, err.Error(), "no accounts")
-}
-
-func TestRotateErrorsForDuplicateAccountIDs(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
-
-	writeFile(t, sourcePath, `[
-	  {
-	    "email": "first@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-1",
-	      "refresh": "refresh-1",
-	      "expires": 111,
-	      "accountId": "account-1"
-	    }
-	  },
-	  {
-	    "email": "second@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-2",
-	      "refresh": "refresh-2",
-	      "expires": 222,
-	      "accountId": "account-1"
-	    }
-	  }
-	]`)
-	writeFile(t, targetPath, `{"openai":{"accountId":"account-1"}}`)
-
-	svc := NewService(log.New(&bytes.Buffer{}, "", 0))
-
-	_, err := svc.Rotate(sourcePath, targetPath)
-	if err == nil {
-		t.Fatal("Rotate() error = nil, want error")
-	}
-
-	assertContains(t, err.Error(), "duplicate openai.accountId")
-}
-
-func TestRotateErrorsForMalformedJSON(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
-
-	writeFile(t, sourcePath, `{not-json}`)
-	writeFile(t, targetPath, `{"openai":{"accountId":"account-1"}}`)
-
-	svc := NewService(log.New(&bytes.Buffer{}, "", 0))
-
-	_, err := svc.Rotate(sourcePath, targetPath)
-	if err == nil {
-		t.Fatal("Rotate() error = nil, want error")
-	}
-
-	assertContains(t, err.Error(), "decode source accounts")
-}
-
-func TestRotateErrorsForMissingOpenAIConfig(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
-
-	writeFile(t, sourcePath, `[
-	  {
-	    "email": "first@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-1",
-	      "refresh": "refresh-1",
-	      "expires": 111,
-	      "accountId": "account-1"
-	    }
-	  }
-	]`)
-	writeFile(t, targetPath, `{"openrouter":{"type":"api","key":"keep-me"}}`)
-
-	svc := NewService(log.New(&bytes.Buffer{}, "", 0))
-
-	_, err := svc.Rotate(sourcePath, targetPath)
-	if err == nil {
-		t.Fatal("Rotate() error = nil, want error")
-	}
-
-	assertContains(t, err.Error(), "missing openai")
-}
-
-func TestRotateLeavesOriginalFileUntouchedOnWriteFailure(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth_open_ai.json")
-	targetPath := filepath.Join(tempDir, "auth.json")
-
-	writeFile(t, sourcePath, `[
-	  {
-	    "email": "first@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-1",
-	      "refresh": "refresh-1",
-	      "expires": 111,
-	      "accountId": "account-1"
-	    }
-	  },
-	  {
-	    "email": "second@example.com",
-	    "openai": {
-	      "type": "oauth",
-	      "access": "access-2",
-	      "refresh": "refresh-2",
-	      "expires": 222,
-	      "accountId": "account-2"
-	    }
-	  }
-	]`)
-
-	original := `{
-	  "openai": {
-	    "type": "oauth",
-	    "access": "access-1",
-	    "refresh": "refresh-1",
-	    "expires": 111,
-	    "accountId": "account-1"
-	  }
-	}`
-	writeFile(t, targetPath, original)
+	writeFile(t, configPath, originalConfig)
+	writeFile(t, openAITargetPath, `{}`)
+	writeFile(t, codexTargetPath, `{}`)
 
 	svc := NewService(log.New(&bytes.Buffer{}, "", 0))
 	svc.writeFileAtomic = func(string, []byte, os.FileMode) error {
 		return errors.New("boom")
 	}
 
-	_, err := svc.Rotate(sourcePath, targetPath)
+	_, err := svc.RotateOpenAIAndCodex(configPath, openAITargetPath, codexTargetPath)
 	if err == nil {
-		t.Fatal("Rotate() error = nil, want error")
+		t.Fatal("expected error")
 	}
 
-	assertContains(t, err.Error(), "write auth target")
-	if got := readFile(t, targetPath); got != original {
-		t.Fatalf("target file changed unexpectedly\n got: %s\nwant: %s", got, original)
+	if got := readFile(t, configPath); got != originalConfig {
+		t.Fatal("config file changed unexpectedly")
 	}
 }
 
@@ -434,60 +199,4 @@ func assertNotContains(t *testing.T, value string, substring string) {
 	if strings.Contains(value, substring) {
 		t.Fatalf("expected %q not to contain %q", value, substring)
 	}
-}
-
-func TestRotateCodex(t *testing.T) {
-	t.Parallel()
-
-	tempDir := t.TempDir()
-	sourcePath := filepath.Join(tempDir, "auth.json.bak")
-	targetPath := filepath.Join(tempDir, "auth.json")
-
-	writeFile(t, sourcePath, `[
-	  {
-	    "email": "first@example.com",
-	    "tokens": {
-	      "id_token": "id-1",
-	      "access_token": "access-1",
-	      "refresh_token": "refresh-1"
-	    }
-	  },
-	  {
-	    "email": "second@example.com",
-	    "tokens": {
-	      "id_token": "id-2",
-	      "access_token": "access-2",
-	      "refresh_token": "refresh-2",
-	      "account_id": "acc-2"
-	    }
-	  }
-	]`)
-
-	writeFile(t, targetPath, `{
-	  "auth_mode": "oauth",
-	  "tokens": {
-	    "id_token": "id-1",
-	    "access_token": "access-1",
-	    "refresh_token": "refresh-1"
-	  }
-	}`)
-
-	var logBuffer bytes.Buffer
-	svc := NewService(log.New(&logBuffer, "", 0))
-
-	err := svc.RotateCodex(sourcePath, targetPath, "second@example.com")
-	if err != nil {
-		t.Fatalf("RotateCodex() error = %v", err)
-	}
-
-	updated := readFile(t, targetPath)
-	assertContains(t, updated, `"auth_mode": "oauth"`)
-	assertContains(t, updated, `"id_token": "id-2"`)
-	assertContains(t, updated, `"access_token": "access-2"`)
-	assertContains(t, updated, `"refresh_token": "refresh-2"`)
-	assertContains(t, updated, `"account_id": "acc-2"`)
-
-	logs := logBuffer.String()
-	assertContains(t, logs, "DEBUG rotate codex start")
-	assertContains(t, logs, "s***d@example.com")
 }

@@ -11,40 +11,16 @@ import (
 	"syscall"
 )
 
-const openAIProviderKey = "openai"
-
-type OpenAIAuth struct {
-	Type      string `json:"type"`
-	Refresh   string `json:"refresh"`
-	Access    string `json:"access"`
-	Expires   int64  `json:"expires"`
-	AccountID string `json:"accountId"`
+type OpenAIAndCodexResult struct {
+	PreviousEmail string
+	SelectedEmail string
+	AccountCount  int
 }
 
-type Account struct {
-	Email  string     `json:"email"`
-	OpenAI OpenAIAuth `json:"openai"`
-}
-
-type AuthConfig map[string]json.RawMessage
-
-type Result struct {
-	PreviousAccountID string
-	SelectedAccountID string
-	SelectedEmail     string
-	AccountCount      int
-}
-
-type CodexTokens struct {
-	IDToken      string `json:"id_token,omitempty"`
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	AccountID    string `json:"account_id,omitempty"`
-}
-
-type CodexAccount struct {
-	Email  string      `json:"email"`
-	Tokens CodexTokens `json:"tokens"`
+type GeminiResult struct {
+	PreviousEmail string
+	SelectedEmail string
+	AccountCount  int
 }
 
 type Service struct {
@@ -63,175 +39,120 @@ func NewService(logger *log.Logger) *Service {
 	}
 }
 
-func (s *Service) Rotate(sourcePath string, targetPath string) (Result, error) {
-	s.debug("rotate start source=%s target=%s", sourcePath, targetPath)
-	unlock, err := lockFile(targetPath + ".lock")
+func (s *Service) RotateOpenAIAndCodex(configPath, openAITargetPath, codexTargetPath string) (OpenAIAndCodexResult, error) {
+	s.debug("rotate_openai_codex start config=%s target_openai=%s target_codex=%s", configPath, openAITargetPath, codexTargetPath)
+
+	unlock, err := lockFile(configPath + ".lock")
 	if err != nil {
-		return Result{}, fmt.Errorf("lock auth target: %w", err)
+		return OpenAIAndCodexResult{}, fmt.Errorf("lock config: %w", err)
 	}
 	defer unlock()
 
-	s.debug("rotate lock acquired target=%s", targetPath)
-
-	accounts, err := s.loadAccounts(sourcePath)
+	configData, err := os.ReadFile(configPath)
 	if err != nil {
-		return Result{}, err
+		return OpenAIAndCodexResult{}, fmt.Errorf("read config: %w", err)
 	}
 
-	targetConfig, currentOpenAI, targetMode, err := s.loadTargetConfig(targetPath)
+	var creds Credentials
+	if err := json.Unmarshal(configData, &creds); err != nil {
+		return OpenAIAndCodexResult{}, fmt.Errorf("decode config: %w", err)
+	}
+
+	if len(creds.OpenAICodex.Accounts) == 0 {
+		return OpenAIAndCodexResult{}, errors.New("no accounts in openai_codex config")
+	}
+
+	previousEmail := creds.OpenAICodex.ActiveEmail
+	var selectedAccount *OpenAICodexEntry
+
+	currentIndex := 0
+	if previousEmail != "" {
+		for i, acc := range creds.OpenAICodex.Accounts {
+			if acc.Email == previousEmail {
+				currentIndex = i
+				break
+			}
+		}
+	}
+
+	accountCount := len(creds.OpenAICodex.Accounts)
+	for i := 1; i <= accountCount; i++ {
+		nextIndex := (currentIndex + i) % accountCount
+		acc := creds.OpenAICodex.Accounts[nextIndex]
+		if acc.IsActive {
+			selectedAccount = &acc
+			break
+		}
+	}
+
+	if selectedAccount == nil {
+		return OpenAIAndCodexResult{}, errors.New("no active accounts found in openai_codex config")
+	}
+
+	creds.OpenAICodex.ActiveEmail = selectedAccount.Email
+
+	updatedConfigJSON, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
-		return Result{}, err
+		return OpenAIAndCodexResult{}, fmt.Errorf("encode updated config: %w", err)
+	}
+	updatedConfigJSON = append(updatedConfigJSON, '\n')
+
+	if err := s.writeFileAtomic(configPath, updatedConfigJSON, 0o600); err != nil {
+		return OpenAIAndCodexResult{}, fmt.Errorf("write config target: %w", err)
 	}
 
-	nextAccount, err := selectNextAccount(accounts, currentOpenAI.AccountID)
-	if err != nil {
-		return Result{}, err
+	if selectedAccount.OpenAI != nil && len(selectedAccount.OpenAI) > 0 {
+		if err := s.updateTargetNode(openAITargetPath, "openai", selectedAccount.OpenAI); err != nil {
+			return OpenAIAndCodexResult{}, fmt.Errorf("update openai target: %w", err)
+		}
 	}
 
-	openAIJSON, err := json.MarshalIndent(nextAccount.OpenAI, "", "  ")
-	if err != nil {
-		return Result{}, fmt.Errorf("encode next openai config: %w", err)
+	if selectedAccount.Codex != nil && len(selectedAccount.Codex) > 0 {
+		var codexObj map[string]any
+		if err := json.Unmarshal(selectedAccount.Codex, &codexObj); err == nil {
+			updatedCodexJSON, _ := json.MarshalIndent(codexObj, "", "  ")
+			updatedCodexJSON = append(updatedCodexJSON, '\n')
+			if err := s.writeFileAtomic(codexTargetPath, updatedCodexJSON, 0o600); err != nil {
+				return OpenAIAndCodexResult{}, fmt.Errorf("write codex target: %w", err)
+			}
+		}
 	}
 
-	targetConfig[openAIProviderKey] = openAIJSON
+	s.debug("rotate_openai_codex complete selected_email=%s", maskEmail(selectedAccount.Email))
 
-	updatedJSON, err := json.MarshalIndent(targetConfig, "", "  ")
-	if err != nil {
-		return Result{}, fmt.Errorf("encode auth target: %w", err)
-	}
-	updatedJSON = append(updatedJSON, '\n')
-
-	s.debug(
-		"rotate selected previous_account_id=%s selected_account_id=%s selected_email=%s account_count=%d",
-		currentOpenAI.AccountID,
-		nextAccount.OpenAI.AccountID,
-		maskEmail(nextAccount.Email),
-		len(accounts),
-	)
-
-	if err := s.writeFileAtomic(targetPath, updatedJSON, targetMode); err != nil {
-		return Result{}, fmt.Errorf("write auth target: %w", err)
-	}
-
-	s.debug("rotate complete target=%s selected_account_id=%s", targetPath, nextAccount.OpenAI.AccountID)
-
-	return Result{
-		PreviousAccountID: currentOpenAI.AccountID,
-		SelectedAccountID: nextAccount.OpenAI.AccountID,
-		SelectedEmail:     nextAccount.Email,
-		AccountCount:      len(accounts),
+	return OpenAIAndCodexResult{
+		PreviousEmail: previousEmail,
+		SelectedEmail: selectedAccount.Email,
+		AccountCount:  accountCount,
 	}, nil
 }
 
-func (s *Service) loadAccounts(path string) ([]Account, error) {
-	s.debug("load accounts start path=%s", path)
+func (s *Service) updateTargetNode(path, jsonKey string, nodeData json.RawMessage) error {
+	var targetConfig map[string]json.RawMessage
+	targetMode := os.FileMode(0o600)
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read source accounts: %w", err)
-	}
-
-	var accounts []Account
-	if err := json.Unmarshal(data, &accounts); err != nil {
-		return nil, fmt.Errorf("decode source accounts: %w", err)
-	}
-
-	if len(accounts) == 0 {
-		return nil, errors.New("no accounts in source file")
-	}
-
-	seenAccountIDs := make(map[string]struct{}, len(accounts))
-
-	for index, account := range accounts {
-		if err := validateAccount(account); err != nil {
-			return nil, fmt.Errorf("invalid source account at index %d: %w", index, err)
+	if info, err := os.Stat(path); err == nil {
+		targetMode = info.Mode().Perm()
+		if targetData, err := os.ReadFile(path); err == nil {
+			_ = json.Unmarshal(targetData, &targetConfig)
 		}
-
-		if _, exists := seenAccountIDs[account.OpenAI.AccountID]; exists {
-			return nil, fmt.Errorf("duplicate openai.accountId %q in source accounts", account.OpenAI.AccountID)
-		}
-
-		seenAccountIDs[account.OpenAI.AccountID] = struct{}{}
 	}
 
-	s.debug("load accounts complete path=%s count=%d", path, len(accounts))
-	return accounts, nil
-}
+	if targetConfig == nil {
+		targetConfig = make(map[string]json.RawMessage)
+	}
 
-func (s *Service) loadTargetConfig(path string) (AuthConfig, OpenAIAuth, os.FileMode, error) {
-	s.debug("load target start path=%s", path)
+	targetConfig[jsonKey] = nodeData
 
-	info, err := os.Stat(path)
+	updatedJSON, err := json.MarshalIndent(targetConfig, "", "  ")
 	if err != nil {
-		return nil, OpenAIAuth{}, 0, fmt.Errorf("stat auth target: %w", err)
+		return fmt.Errorf("encode target file: %w", err)
 	}
+	updatedJSON = append(updatedJSON, '\n')
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, OpenAIAuth{}, 0, fmt.Errorf("read auth target: %w", err)
+	if err := s.writeFileAtomic(path, updatedJSON, targetMode); err != nil {
+		return fmt.Errorf("write target file: %w", err)
 	}
-
-	var config AuthConfig
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, OpenAIAuth{}, 0, fmt.Errorf("decode auth target: %w", err)
-	}
-
-	openAIJSON, ok := config[openAIProviderKey]
-	if !ok {
-		return nil, OpenAIAuth{}, 0, errors.New("missing openai config in auth target")
-	}
-
-	var openAI OpenAIAuth
-	if err := json.Unmarshal(openAIJSON, &openAI); err != nil {
-		return nil, OpenAIAuth{}, 0, fmt.Errorf("decode auth target openai: %w", err)
-	}
-
-	if strings.TrimSpace(openAI.AccountID) == "" {
-		return nil, OpenAIAuth{}, 0, errors.New("missing openai.accountId in auth target")
-	}
-
-	s.debug("load target complete path=%s current_account_id=%s", path, openAI.AccountID)
-	return config, openAI, info.Mode().Perm(), nil
-}
-
-func selectNextAccount(accounts []Account, currentAccountID string) (Account, error) {
-	for index, account := range accounts {
-		if account.OpenAI.AccountID != currentAccountID {
-			continue
-		}
-
-		nextIndex := (index + 1) % len(accounts)
-		return accounts[nextIndex], nil
-	}
-
-	return Account{}, fmt.Errorf("current accountId %q not found in source accounts", currentAccountID)
-}
-
-func validateAccount(account Account) error {
-	if strings.TrimSpace(account.Email) == "" {
-		return errors.New("missing email")
-	}
-
-	if strings.TrimSpace(account.OpenAI.Type) == "" {
-		return errors.New("missing openai.type")
-	}
-
-	if strings.TrimSpace(account.OpenAI.Access) == "" {
-		return errors.New("missing openai.access")
-	}
-
-	if strings.TrimSpace(account.OpenAI.Refresh) == "" {
-		return errors.New("missing openai.refresh")
-	}
-
-	if account.OpenAI.Expires == 0 {
-		return errors.New("missing openai.expires")
-	}
-
-	if strings.TrimSpace(account.OpenAI.AccountID) == "" {
-		return errors.New("missing openai.accountId")
-	}
-
 	return nil
 }
 
@@ -307,67 +228,5 @@ func (s *Service) debug(format string, args ...any) {
 	if s.logger == nil {
 		return
 	}
-
 	s.logger.Printf("DEBUG "+format, args...)
-}
-
-func (s *Service) RotateCodex(sourcePath, targetPath, selectedEmail string) error {
-	s.debug("rotate codex start source=%s target=%s email=%s", sourcePath, targetPath, maskEmail(selectedEmail))
-
-	unlock, err := lockFile(targetPath + ".lock")
-	if err != nil {
-		return fmt.Errorf("lock codex target: %w", err)
-	}
-	defer unlock()
-
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		return fmt.Errorf("read codex source: %w", err)
-	}
-
-	var accounts []CodexAccount
-	if err := json.Unmarshal(data, &accounts); err != nil {
-		return fmt.Errorf("decode codex source: %w", err)
-	}
-
-	var matchedAccount *CodexAccount
-	for _, acc := range accounts {
-		if acc.Email == selectedEmail {
-			matchedAccount = &acc
-			break
-		}
-	}
-
-	if matchedAccount == nil {
-		return fmt.Errorf("codex account for email %q not found in source", selectedEmail)
-	}
-
-	var targetConfig map[string]any
-	targetMode := os.FileMode(0o600)
-
-	if info, err := os.Stat(targetPath); err == nil {
-		targetMode = info.Mode().Perm()
-		if targetData, err := os.ReadFile(targetPath); err == nil {
-			_ = json.Unmarshal(targetData, &targetConfig)
-		}
-	}
-
-	if targetConfig == nil {
-		targetConfig = make(map[string]any)
-	}
-
-	targetConfig["tokens"] = matchedAccount.Tokens
-
-	updatedJSON, err := json.MarshalIndent(targetConfig, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode codex target: %w", err)
-	}
-	updatedJSON = append(updatedJSON, '\n')
-
-	if err := s.writeFileAtomic(targetPath, updatedJSON, targetMode); err != nil {
-		return fmt.Errorf("write codex target: %w", err)
-	}
-
-	s.debug("rotate codex complete target=%s", targetPath)
-	return nil
 }
