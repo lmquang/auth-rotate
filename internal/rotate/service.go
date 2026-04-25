@@ -48,14 +48,9 @@ func (s *Service) RotateOpenAIAndCodex(configPath, openAITargetPath, codexTarget
 	}
 	defer unlock()
 
-	configData, err := os.ReadFile(configPath)
+	creds, err := loadCredentials(configPath)
 	if err != nil {
-		return OpenAIAndCodexResult{}, fmt.Errorf("read config: %w", err)
-	}
-
-	var creds Credentials
-	if err := json.Unmarshal(configData, &creds); err != nil {
-		return OpenAIAndCodexResult{}, fmt.Errorf("decode config: %w", err)
+		return OpenAIAndCodexResult{}, err
 	}
 
 	if len(creds.OpenAICodex.Accounts) == 0 {
@@ -101,21 +96,8 @@ func (s *Service) RotateOpenAIAndCodex(configPath, openAITargetPath, codexTarget
 		return OpenAIAndCodexResult{}, fmt.Errorf("write config target: %w", err)
 	}
 
-	if selectedAccount.OpenAI != nil && len(selectedAccount.OpenAI) > 0 {
-		if err := s.updateTargetNode(openAITargetPath, "openai", selectedAccount.OpenAI); err != nil {
-			return OpenAIAndCodexResult{}, fmt.Errorf("update openai target: %w", err)
-		}
-	}
-
-	if selectedAccount.Codex != nil && len(selectedAccount.Codex) > 0 {
-		var codexObj map[string]any
-		if err := json.Unmarshal(selectedAccount.Codex, &codexObj); err == nil {
-			updatedCodexJSON, _ := json.MarshalIndent(codexObj, "", "  ")
-			updatedCodexJSON = append(updatedCodexJSON, '\n')
-			if err := s.writeFileAtomic(codexTargetPath, updatedCodexJSON, 0o600); err != nil {
-				return OpenAIAndCodexResult{}, fmt.Errorf("write codex target: %w", err)
-			}
-		}
+	if err := s.writeOpenAIAndCodexTargets(*selectedAccount, openAITargetPath, codexTargetPath); err != nil {
+		return OpenAIAndCodexResult{}, err
 	}
 
 	s.debug("rotate_openai_codex complete selected_email=%s", maskEmail(selectedAccount.Email))
@@ -125,6 +107,107 @@ func (s *Service) RotateOpenAIAndCodex(configPath, openAITargetPath, codexTarget
 		SelectedEmail: selectedAccount.Email,
 		AccountCount:  accountCount,
 	}, nil
+}
+
+func (s *Service) SyncOpenAIAndCodex(configPath, openAITargetPath, codexTargetPath string) (OpenAIAndCodexResult, error) {
+	s.debug("sync_openai_codex start config=%s target_openai=%s target_codex=%s", configPath, openAITargetPath, codexTargetPath)
+
+	unlock, err := lockFile(configPath + ".lock")
+	if err != nil {
+		return OpenAIAndCodexResult{}, fmt.Errorf("lock config: %w", err)
+	}
+	defer unlock()
+
+	creds, err := loadCredentials(configPath)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	selectedAccount, err := findOpenAICodexAccountByEmail(creds.OpenAICodex.Accounts, creds.OpenAICodex.ActiveEmail)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	if err := s.writeOpenAIAndCodexTargets(selectedAccount, openAITargetPath, codexTargetPath); err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	s.debug("sync_openai_codex complete selected_email=%s", maskEmail(selectedAccount.Email))
+
+	return OpenAIAndCodexResult{
+		PreviousEmail: selectedAccount.Email,
+		SelectedEmail: selectedAccount.Email,
+		AccountCount:  len(creds.OpenAICodex.Accounts),
+	}, nil
+}
+
+func loadCredentials(configPath string) (Credentials, error) {
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		return Credentials{}, fmt.Errorf("read config: %w", err)
+	}
+
+	var creds Credentials
+	if err := json.Unmarshal(configData, &creds); err != nil {
+		return Credentials{}, fmt.Errorf("decode config: %w", err)
+	}
+
+	return creds, nil
+}
+
+func findOpenAICodexAccountByEmail(accounts []OpenAICodexEntry, email string) (OpenAICodexEntry, error) {
+	if len(accounts) == 0 {
+		return OpenAICodexEntry{}, errors.New("no accounts in openai_codex config")
+	}
+
+	if email == "" {
+		return OpenAICodexEntry{}, errors.New("active openai_codex account is empty")
+	}
+
+	for _, account := range accounts {
+		if account.Email == email {
+			return account, nil
+		}
+	}
+
+	return OpenAICodexEntry{}, fmt.Errorf("active openai_codex account not found: %s", email)
+}
+
+func (s *Service) writeOpenAIAndCodexTargets(account OpenAICodexEntry, openAITargetPath, codexTargetPath string) error {
+	if account.OpenAI != nil && len(account.OpenAI) > 0 {
+		if err := s.updateTargetNode(openAITargetPath, "openai", account.OpenAI); err != nil {
+			return fmt.Errorf("update openai target: %w", err)
+		}
+	}
+
+	if err := s.writeCodexTarget(codexTargetPath, account.Codex); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Service) writeCodexTarget(path string, nodeData json.RawMessage) error {
+	if len(nodeData) == 0 {
+		return nil
+	}
+
+	var codexObj map[string]any
+	if err := json.Unmarshal(nodeData, &codexObj); err != nil {
+		return fmt.Errorf("decode codex target: %w", err)
+	}
+
+	updatedCodexJSON, err := json.MarshalIndent(codexObj, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode codex target: %w", err)
+	}
+	updatedCodexJSON = append(updatedCodexJSON, '\n')
+
+	if err := s.writeFileAtomic(path, updatedCodexJSON, 0o600); err != nil {
+		return fmt.Errorf("write codex target: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Service) updateTargetNode(path, jsonKey string, nodeData json.RawMessage) error {

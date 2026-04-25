@@ -1,6 +1,6 @@
 # auth-rotate
 
-Go CLI tool that round-rotates OAuth accounts across providers.
+Go CLI tool that rotates or syncs OAuth accounts from a central credentials file.
 
 ## Providers
 
@@ -36,28 +36,40 @@ After rotation:
 # Build
 make build
 
-# Rotate OpenAI (default)
+# Rotate OpenAI/Codex (default)
 ./bin/auth-rotate
 
-# Rotate OpenAI (explicit)
-./bin/auth-rotate -provider openai
+# Rotate OpenAI/Codex (explicit)
+./bin/auth-rotate rotate -provider openai
 
 # Rotate Gemini
-./bin/auth-rotate -provider gemini
+./bin/auth-rotate rotate -provider gemini
+
+# Sync current OpenAI/Codex account from credentials.json
+./bin/auth-rotate sync
+
+# Sync current Gemini account from credentials.json
+./bin/auth-rotate sync -provider gemini
 
 # Custom paths
-./bin/auth-rotate -source /path/to/auth_open_ai.json -target /path/to/auth.json
-./bin/auth-rotate -provider gemini -gemini-path /path/to/google_accounts.json
+./bin/auth-rotate sync -config /path/to/credentials.json -openai-target /path/to/auth.json -codex-target /path/to/codex-auth.json
+./bin/auth-rotate rotate -provider gemini -gemini-target /path/to/oauth_creds.json
 ```
 
 ## Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-provider` | `openai` | Provider to rotate: `openai` or `gemini` |
-| `-source` | `~/.local/share/opencode/auth_open_ai.json` | OpenAI source accounts file |
-| `-target` | `~/.local/share/opencode/auth.json` | OpenAI target config file |
-| `-gemini-path` | `~/.gemini/google_accounts.json` | Gemini accounts file |
+| `-provider` | `openai` | Provider to use: `openai` or `gemini` |
+| `-config` | `~/.config/auth-rotate/credentials.json` | Central credentials file |
+| `-openai-target` | `~/.local/share/opencode/auth.json` | OpenCode target config file |
+| `-codex-target` | `~/.codex/auth.json` | Codex target config file |
+| `-gemini-target` | `~/.gemini/oauth_creds.json` | Gemini active credentials file |
+
+## Commands
+
+- `rotate`: move to the next active account and write it to the provider target files
+- `sync`: re-apply the currently selected account from `credentials.json` to the provider target files without rotating
 
 ## Features
 
@@ -65,7 +77,7 @@ make build
 - **File locking**: uses `flock` to prevent concurrent rotations
 - **Input validation**: checks for missing fields, duplicates, malformed JSON
 - **PII masking**: emails are masked in debug logs (e.g., `j***n@example.com`)
-- **Gemini creds sync**: updates `oauth_creds.json` with the new active account's credentials
+- **Gemini creds sync**: updates `oauth_creds.json` with the selected account's credentials
 
 ## Development
 
@@ -92,10 +104,11 @@ go vet ./...
 ├── main.go
 ├── internal/
 │   └── rotate/
-│       ├── service.go          # OpenAI rotation, shared types, helpers
+│       ├── service.go          # OpenAI/Codex rotation, sync, shared helpers
 │       ├── service_test.go
-│       ├── gemini.go            # Gemini rotation
-│       └── gemini_test.go
+│       ├── gemini.go           # Gemini rotation and sync
+│       ├── gemini_test.go
+│       └── sync_test.go
 ├── Makefile
 └── go.mod
 ```

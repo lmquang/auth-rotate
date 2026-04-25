@@ -16,14 +16,9 @@ func (s *Service) RotateGemini(configPath, activeCredsPath string) (GeminiResult
 	}
 	defer unlock()
 
-	configData, err := os.ReadFile(configPath)
+	creds, err := loadCredentials(configPath)
 	if err != nil {
-		return GeminiResult{}, fmt.Errorf("read config: %w", err)
-	}
-
-	var creds Credentials
-	if err := json.Unmarshal(configData, &creds); err != nil {
-		return GeminiResult{}, fmt.Errorf("decode config: %w", err)
+		return GeminiResult{}, err
 	}
 
 	if len(creds.Gemini.Accounts) == 0 {
@@ -69,20 +64,8 @@ func (s *Service) RotateGemini(configPath, activeCredsPath string) (GeminiResult
 		return GeminiResult{}, fmt.Errorf("write config target: %w", err)
 	}
 
-	info, err := os.Stat(activeCredsPath)
-	targetMode := os.FileMode(0o600)
-	if err == nil {
-		targetMode = info.Mode().Perm()
-	}
-
-	activeJSON, err := json.MarshalIndent(selectedAccount.Data, "", "  ")
-	if err != nil {
-		return GeminiResult{}, fmt.Errorf("encode active creds: %w", err)
-	}
-	activeJSON = append(activeJSON, '\n')
-
-	if err := s.writeFileAtomic(activeCredsPath, activeJSON, targetMode); err != nil {
-		return GeminiResult{}, fmt.Errorf("write active creds target: %w", err)
+	if err := s.writeGeminiTarget(activeCredsPath, selectedAccount.Data); err != nil {
+		return GeminiResult{}, err
 	}
 
 	s.debug("rotate_gemini complete selected_email=%s", maskEmail(selectedAccount.Email))
@@ -92,4 +75,74 @@ func (s *Service) RotateGemini(configPath, activeCredsPath string) (GeminiResult
 		SelectedEmail: selectedAccount.Email,
 		AccountCount:  accountCount,
 	}, nil
+}
+
+func (s *Service) SyncGemini(configPath, activeCredsPath string) (GeminiResult, error) {
+	s.debug("sync_gemini start config=%s target_active=%s", configPath, activeCredsPath)
+
+	unlock, err := lockFile(configPath + ".lock")
+	if err != nil {
+		return GeminiResult{}, fmt.Errorf("lock config: %w", err)
+	}
+	defer unlock()
+
+	creds, err := loadCredentials(configPath)
+	if err != nil {
+		return GeminiResult{}, err
+	}
+
+	selectedAccount, err := findGeminiAccountByEmail(creds.Gemini.Accounts, creds.Gemini.ActiveEmail)
+	if err != nil {
+		return GeminiResult{}, err
+	}
+
+	if err := s.writeGeminiTarget(activeCredsPath, selectedAccount.Data); err != nil {
+		return GeminiResult{}, err
+	}
+
+	s.debug("sync_gemini complete selected_email=%s", maskEmail(selectedAccount.Email))
+
+	return GeminiResult{
+		PreviousEmail: selectedAccount.Email,
+		SelectedEmail: selectedAccount.Email,
+		AccountCount:  len(creds.Gemini.Accounts),
+	}, nil
+}
+
+func findGeminiAccountByEmail(accounts []GeminiCredEntry, email string) (GeminiCredEntry, error) {
+	if len(accounts) == 0 {
+		return GeminiCredEntry{}, errors.New("no accounts in gemini config")
+	}
+
+	if email == "" {
+		return GeminiCredEntry{}, errors.New("active gemini account is empty")
+	}
+
+	for _, account := range accounts {
+		if account.Email == email {
+			return account, nil
+		}
+	}
+
+	return GeminiCredEntry{}, fmt.Errorf("active gemini account not found: %s", email)
+}
+
+func (s *Service) writeGeminiTarget(path string, nodeData json.RawMessage) error {
+	info, err := os.Stat(path)
+	targetMode := os.FileMode(0o600)
+	if err == nil {
+		targetMode = info.Mode().Perm()
+	}
+
+	activeJSON, err := json.MarshalIndent(nodeData, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode active creds: %w", err)
+	}
+	activeJSON = append(activeJSON, '\n')
+
+	if err := s.writeFileAtomic(path, activeJSON, targetMode); err != nil {
+		return fmt.Errorf("write active creds target: %w", err)
+	}
+
+	return nil
 }
