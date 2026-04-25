@@ -15,10 +15,11 @@ type Credentials struct {
 }
 
 type OpenAICodexEntry struct {
-	Email    string          `json:"email"`
-	IsActive bool            `json:"isActive"`
-	OpenAI   json.RawMessage `json:"openai"`
-	Codex    json.RawMessage `json:"codex"`
+	AccountID string          `json:"accountId,omitempty"`
+	Email     string          `json:"email"`
+	IsActive  bool            `json:"isActive"`
+	OpenAI    json.RawMessage `json:"openai"`
+	Codex     json.RawMessage `json:"codex"`
 }
 
 type GeminiCredEntry struct {

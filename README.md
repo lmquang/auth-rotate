@@ -1,6 +1,6 @@
 # auth-rotate
 
-Go CLI tool that rotates or syncs OAuth accounts from a central credentials file.
+Go CLI tool that rotates, syncs, and imports OAuth accounts from a central credentials file.
 
 ## Providers
 
@@ -51,6 +51,12 @@ make build
 # Sync current Gemini account from credentials.json
 ./bin/auth-rotate sync -provider gemini
 
+# Import current OpenCode auth.json into credentials.json
+./bin/auth-rotate import -provider opencode
+
+# Import current Codex auth.json into credentials.json
+./bin/auth-rotate import -provider codex
+
 # Custom paths
 ./bin/auth-rotate sync -config /path/to/credentials.json -openai-target /path/to/auth.json -codex-target /path/to/codex-auth.json
 ./bin/auth-rotate rotate -provider gemini -gemini-target /path/to/oauth_creds.json
@@ -70,6 +76,13 @@ make build
 
 - `rotate`: move to the next active account and write it to the provider target files
 - `sync`: re-apply the currently selected account from `credentials.json` to the provider target files without rotating
+- `import`: read the current tool auth file and merge it back into `credentials.json`
+
+OpenAI/Codex import matches accounts using a normalized central `accountId` field:
+
+- OpenCode source uses `openai.accountId`
+- Codex source uses `tokens.account_id`
+- Central credentials store the normalized value as `accountId`
 
 ## Features
 
@@ -104,10 +117,11 @@ go vet ./...
 ├── main.go
 ├── internal/
 │   └── rotate/
-│       ├── service.go          # OpenAI/Codex rotation, sync, shared helpers
+│       ├── service.go          # OpenAI/Codex rotation, sync, import, shared helpers
 │       ├── service_test.go
 │       ├── gemini.go           # Gemini rotation and sync
 │       ├── gemini_test.go
+│       ├── import_test.go
 │       └── sync_test.go
 ├── Makefile
 └── go.mod

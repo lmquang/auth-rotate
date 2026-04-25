@@ -141,6 +141,99 @@ func (s *Service) SyncOpenAIAndCodex(configPath, openAITargetPath, codexTargetPa
 	}, nil
 }
 
+func (s *Service) ImportOpenCode(configPath, openAITargetPath string) (OpenAIAndCodexResult, error) {
+	s.debug("import_opencode start config=%s target_openai=%s", configPath, openAITargetPath)
+
+	unlock, err := lockFile(configPath + ".lock")
+	if err != nil {
+		return OpenAIAndCodexResult{}, fmt.Errorf("lock config: %w", err)
+	}
+	defer unlock()
+
+	creds, err := loadCredentials(configPath)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	openAIData, accountID, err := loadOpenCodeTarget(openAITargetPath)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	matchedIndex, err := findOpenAICodexAccountIndexByID(creds.OpenAICodex.Accounts, accountID)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	previousEmail := creds.OpenAICodex.ActiveEmail
+	selectedAccount := creds.OpenAICodex.Accounts[matchedIndex]
+	selectedAccount.AccountID = accountID
+	selectedAccount.OpenAI = openAIData
+	updatedCodex, err := mergeOpenCodeIntoCodex(openAIData, selectedAccount.Codex)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+	selectedAccount.Codex = updatedCodex
+	creds.OpenAICodex.Accounts[matchedIndex] = selectedAccount
+	creds.OpenAICodex.ActiveEmail = selectedAccount.Email
+
+	if err := s.saveCredentials(configPath, creds); err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	s.debug("import_opencode complete selected_email=%s", maskEmail(selectedAccount.Email))
+
+	return OpenAIAndCodexResult{
+		PreviousEmail: previousEmail,
+		SelectedEmail: selectedAccount.Email,
+		AccountCount:  len(creds.OpenAICodex.Accounts),
+	}, nil
+}
+
+func (s *Service) ImportCodex(configPath, codexTargetPath string) (OpenAIAndCodexResult, error) {
+	s.debug("import_codex start config=%s target_codex=%s", configPath, codexTargetPath)
+
+	unlock, err := lockFile(configPath + ".lock")
+	if err != nil {
+		return OpenAIAndCodexResult{}, fmt.Errorf("lock config: %w", err)
+	}
+	defer unlock()
+
+	creds, err := loadCredentials(configPath)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	codexData, accountID, err := loadCodexTarget(codexTargetPath)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	matchedIndex, err := findOpenAICodexAccountIndexByID(creds.OpenAICodex.Accounts, accountID)
+	if err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	previousEmail := creds.OpenAICodex.ActiveEmail
+	selectedAccount := creds.OpenAICodex.Accounts[matchedIndex]
+	selectedAccount.AccountID = accountID
+	selectedAccount.Codex = codexData
+	creds.OpenAICodex.Accounts[matchedIndex] = selectedAccount
+	creds.OpenAICodex.ActiveEmail = selectedAccount.Email
+
+	if err := s.saveCredentials(configPath, creds); err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	s.debug("import_codex complete selected_email=%s", maskEmail(selectedAccount.Email))
+
+	return OpenAIAndCodexResult{
+		PreviousEmail: previousEmail,
+		SelectedEmail: selectedAccount.Email,
+		AccountCount:  len(creds.OpenAICodex.Accounts),
+	}, nil
+}
+
 func loadCredentials(configPath string) (Credentials, error) {
 	configData, err := os.ReadFile(configPath)
 	if err != nil {
@@ -153,6 +246,20 @@ func loadCredentials(configPath string) (Credentials, error) {
 	}
 
 	return creds, nil
+}
+
+func (s *Service) saveCredentials(configPath string, creds Credentials) error {
+	updatedConfigJSON, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode updated config: %w", err)
+	}
+	updatedConfigJSON = append(updatedConfigJSON, '\n')
+
+	if err := s.writeFileAtomic(configPath, updatedConfigJSON, 0o600); err != nil {
+		return fmt.Errorf("write config target: %w", err)
+	}
+
+	return nil
 }
 
 func findOpenAICodexAccountByEmail(accounts []OpenAICodexEntry, email string) (OpenAICodexEntry, error) {
@@ -171,6 +278,182 @@ func findOpenAICodexAccountByEmail(accounts []OpenAICodexEntry, email string) (O
 	}
 
 	return OpenAICodexEntry{}, fmt.Errorf("active openai_codex account not found: %s", email)
+}
+
+func findOpenAICodexAccountIndexByID(accounts []OpenAICodexEntry, accountID string) (int, error) {
+	if len(accounts) == 0 {
+		return -1, errors.New("no accounts in openai_codex config")
+	}
+
+	if accountID == "" {
+		return -1, errors.New("account id is empty")
+	}
+
+	matchedIndex := -1
+	for i, account := range accounts {
+		storedAccountID, err := storedOpenAICodexAccountID(account)
+		if err != nil {
+			return -1, fmt.Errorf("read stored account id for %s: %w", account.Email, err)
+		}
+
+		if storedAccountID != accountID {
+			continue
+		}
+
+		if matchedIndex != -1 {
+			return -1, fmt.Errorf("multiple openai_codex accounts found for account id: %s", accountID)
+		}
+
+		matchedIndex = i
+	}
+
+	if matchedIndex == -1 {
+		return -1, fmt.Errorf("openai_codex account not found for account id: %s", accountID)
+	}
+
+	return matchedIndex, nil
+}
+
+func storedOpenAICodexAccountID(account OpenAICodexEntry) (string, error) {
+	if account.AccountID != "" {
+		return account.AccountID, nil
+	}
+
+	accountID, err := extractOpenCodeAccountID(account.OpenAI)
+	if err != nil {
+		return "", err
+	}
+	if accountID != "" {
+		return accountID, nil
+	}
+
+	return extractCodexAccountID(account.Codex)
+}
+
+func loadOpenCodeTarget(path string) (json.RawMessage, string, error) {
+	targetData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read openai target: %w", err)
+	}
+
+	var target struct {
+		OpenAI json.RawMessage `json:"openai"`
+	}
+	if err := json.Unmarshal(targetData, &target); err != nil {
+		return nil, "", fmt.Errorf("decode openai target: %w", err)
+	}
+
+	if len(target.OpenAI) == 0 {
+		return nil, "", errors.New("openai target missing openai credentials")
+	}
+
+	accountID, err := extractOpenCodeAccountID(target.OpenAI)
+	if err != nil {
+		return nil, "", err
+	}
+	if accountID == "" {
+		return nil, "", errors.New("openai target missing accountId")
+	}
+
+	return target.OpenAI, accountID, nil
+}
+
+func loadCodexTarget(path string) (json.RawMessage, string, error) {
+	targetData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read codex target: %w", err)
+	}
+
+	accountID, err := extractCodexAccountID(targetData)
+	if err != nil {
+		return nil, "", err
+	}
+	if accountID == "" {
+		return nil, "", errors.New("codex target missing tokens.account_id")
+	}
+
+	return json.RawMessage(targetData), accountID, nil
+}
+
+func extractOpenCodeAccountID(nodeData json.RawMessage) (string, error) {
+	if len(nodeData) == 0 {
+		return "", nil
+	}
+
+	var payload struct {
+		AccountID string `json:"accountId"`
+	}
+	if err := json.Unmarshal(nodeData, &payload); err != nil {
+		return "", fmt.Errorf("decode openai account id: %w", err)
+	}
+
+	return payload.AccountID, nil
+}
+
+func extractCodexAccountID(nodeData json.RawMessage) (string, error) {
+	if len(nodeData) == 0 {
+		return "", nil
+	}
+
+	var payload struct {
+		Tokens struct {
+			AccountID string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(nodeData, &payload); err != nil {
+		return "", fmt.Errorf("decode codex account id: %w", err)
+	}
+
+	return payload.Tokens.AccountID, nil
+}
+
+func mergeOpenCodeIntoCodex(openAIData, existingCodex json.RawMessage) (json.RawMessage, error) {
+	if len(openAIData) == 0 {
+		return existingCodex, nil
+	}
+
+	var openAIPayload struct {
+		Access    string `json:"access"`
+		Refresh   string `json:"refresh"`
+		AccountID string `json:"accountId"`
+	}
+	if err := json.Unmarshal(openAIData, &openAIPayload); err != nil {
+		return nil, fmt.Errorf("decode openai tokens for codex: %w", err)
+	}
+
+	var codexPayload map[string]any
+	if len(existingCodex) > 0 {
+		if err := json.Unmarshal(existingCodex, &codexPayload); err != nil {
+			return nil, fmt.Errorf("decode existing codex target: %w", err)
+		}
+	}
+	if codexPayload == nil {
+		codexPayload = make(map[string]any)
+	}
+
+	tokens, _ := codexPayload["tokens"].(map[string]any)
+	if tokens == nil {
+		tokens = make(map[string]any)
+	}
+
+	if openAIPayload.Access != "" {
+		tokens["access_token"] = openAIPayload.Access
+	}
+	if openAIPayload.Refresh != "" {
+		tokens["refresh_token"] = openAIPayload.Refresh
+	}
+	if openAIPayload.AccountID != "" {
+		tokens["account_id"] = openAIPayload.AccountID
+	}
+
+	codexPayload["tokens"] = tokens
+
+	updatedCodexJSON, err := json.Marshal(codexPayload)
+	if err != nil {
+		return nil, fmt.Errorf("encode codex target from openai: %w", err)
+	}
+
+	return json.RawMessage(updatedCodexJSON), nil
 }
 
 func (s *Service) writeOpenAIAndCodexTargets(account OpenAICodexEntry, openAITargetPath, codexTargetPath string) error {
