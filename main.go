@@ -162,7 +162,7 @@ func main() {
 	case "import":
 		switch *provider {
 		case "opencode":
-			result, err := service.ImportOpenCode(*configPath, *openAITargetPath)
+			result, err := service.ImportOpenCode(*configPath, *openAITargetPath, *codexTargetPath)
 			if err != nil {
 				logger.Printf("DEBUG cli error command=%s config=%s target=%s err=%v", command, *configPath, *openAITargetPath, err)
 				fmt.Fprintf(os.Stderr, "import opencode failed: %v\n", err)
@@ -180,7 +180,7 @@ func main() {
 			fmt.Printf("imported opencode account into central credentials: %s -> %s\n", result.PreviousEmail, result.SelectedEmail)
 
 		case "codex":
-			result, err := service.ImportCodex(*configPath, *codexTargetPath)
+			result, err := service.ImportCodex(*configPath, *openAITargetPath, *codexTargetPath)
 			if err != nil {
 				logger.Printf("DEBUG cli error command=%s config=%s target=%s err=%v", command, *configPath, *codexTargetPath, err)
 				fmt.Fprintf(os.Stderr, "import codex failed: %v\n", err)

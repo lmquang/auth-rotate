@@ -141,7 +141,7 @@ func (s *Service) SyncOpenAIAndCodex(configPath, openAITargetPath, codexTargetPa
 	}, nil
 }
 
-func (s *Service) ImportOpenCode(configPath, openAITargetPath string) (OpenAIAndCodexResult, error) {
+func (s *Service) ImportOpenCode(configPath, openAITargetPath, codexTargetPath string) (OpenAIAndCodexResult, error) {
 	s.debug("import_opencode start config=%s target_openai=%s", configPath, openAITargetPath)
 
 	unlock, err := lockFile(configPath + ".lock")
@@ -181,6 +181,10 @@ func (s *Service) ImportOpenCode(configPath, openAITargetPath string) (OpenAIAnd
 		return OpenAIAndCodexResult{}, err
 	}
 
+	if err := s.writeOpenAIAndCodexTargets(selectedAccount, openAITargetPath, codexTargetPath); err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
 	s.debug("import_opencode complete selected_email=%s", maskEmail(selectedAccount.Email))
 
 	return OpenAIAndCodexResult{
@@ -190,7 +194,7 @@ func (s *Service) ImportOpenCode(configPath, openAITargetPath string) (OpenAIAnd
 	}, nil
 }
 
-func (s *Service) ImportCodex(configPath, codexTargetPath string) (OpenAIAndCodexResult, error) {
+func (s *Service) ImportCodex(configPath, openAITargetPath, codexTargetPath string) (OpenAIAndCodexResult, error) {
 	s.debug("import_codex start config=%s target_codex=%s", configPath, codexTargetPath)
 
 	unlock, err := lockFile(configPath + ".lock")
@@ -222,6 +226,10 @@ func (s *Service) ImportCodex(configPath, codexTargetPath string) (OpenAIAndCode
 	creds.OpenAICodex.ActiveEmail = selectedAccount.Email
 
 	if err := s.saveCredentials(configPath, creds); err != nil {
+		return OpenAIAndCodexResult{}, err
+	}
+
+	if err := s.writeOpenAIAndCodexTargets(selectedAccount, openAITargetPath, codexTargetPath); err != nil {
 		return OpenAIAndCodexResult{}, err
 	}
 
