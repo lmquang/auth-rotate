@@ -99,9 +99,9 @@ func main() {
 					email = e
 				}
 				delete(acc, "email") // remove email from raw codex object
-				
+
 				rawBytes, _ := json.Marshal(acc)
-				
+
 				if existing, ok := mergedOpenAICodex[email]; ok {
 					existing.Codex = rawBytes
 				} else {
